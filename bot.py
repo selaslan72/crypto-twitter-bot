@@ -1,35 +1,26 @@
-import os
-import re
-import random
+import os, re, json, random, hashlib
 import datetime as dt
 import requests
 from bs4 import BeautifulSoup
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw
 
 import tweepy
 from openai import OpenAI
 
-# =========================
-# AI (GitHub Models - FREE)
-# =========================
+# ========= AI (GitHub Models) =========
 ai = OpenAI(
     base_url="https://models.github.ai/inference",
     api_key=os.environ["GITHUB_TOKEN"],
 )
 
-# =========================
-# X Auth (OAuth 1.0a)
-# - Media upload için v1.1 API (tweepy.API)
-# - Tweet create için v2 Client (tweepy.Client)
-# =========================
+# ========= X Auth (OAuth 1.0a) =========
 auth = tweepy.OAuth1UserHandler(
     consumer_key=os.environ["X_API_KEY"],
     consumer_secret=os.environ["X_API_SECRET"],
     access_token=os.environ["X_ACCESS_TOKEN"],
     access_token_secret=os.environ["X_ACCESS_TOKEN_SECRET"],
 )
-x_api_v1 = tweepy.API(auth)
-
+x_api_v1 = tweepy.API(auth)  # media upload
 x_client_v2 = tweepy.Client(
     consumer_key=os.environ["X_API_KEY"],
     consumer_secret=os.environ["X_API_SECRET"],
@@ -39,207 +30,234 @@ x_client_v2 = tweepy.Client(
 
 HEADERS = {"User-Agent": "Mozilla/5.0 (crypto-bot)"}
 
-# -------------------------
-# Sources
-# -------------------------
-COINGECKO_NEW_API = "https://api.coingecko.com/api/v3/coins/list/new"  # docs exist (may be rate-limited)
-COINGECKO_NEW_WEB = "https://www.coingecko.com/en/new-cryptocurrencies"  # web fallback :contentReference[oaicite:2]{index=2}
-CRYPTORANK_UPCOMING = "https://cryptorank.io/upcoming-ico"  # :contentReference[oaicite:3]{index=3}
+COINGECKO_NEW_API = "https://api.coingecko.com/api/v3/coins/list/new"
+COINGECKO_NEW_WEB = "https://www.coingecko.com/en/new-cryptocurrencies"
+CRYPTORANK_UPCOMING = "https://cryptorank.io/upcoming-ico"
 
+STATE_PATH = "state.json"
+SEEN_DAYS_PROJECT = 7
+SEEN_DAYS_TEXT = 2  # aynı metin 2 gün içinde tekrar olmasın
 
-def fetch_text(url: str, limit: int = 8000) -> str:
+# ----------------- State -----------------
+def load_state():
     try:
-        r = requests.get(url, headers=HEADERS, timeout=20)
-        r.raise_for_status()
+        with open(STATE_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {"seen_projects": {}, "seen_text_hashes": {}, "last_reply_date": ""}
+
+def save_state(state):
+    with open(STATE_PATH, "w", encoding="utf-8") as f:
+        json.dump(state, f, ensure_ascii=False, indent=2)
+
+def iso_today():
+    return dt.datetime.utcnow().date().isoformat()
+
+def days_ago(iso_date: str) -> int:
+    try:
+        d = dt.date.fromisoformat(iso_date)
+        return (dt.datetime.utcnow().date() - d).days
+    except Exception:
+        return 9999
+
+def hash_text(s: str) -> str:
+    return hashlib.sha256(s.encode("utf-8")).hexdigest()[:16]
+
+# ----------------- Helpers -----------------
+def fetch_text(url: str, limit: int = 120000) -> str:
+    try:
+        r = requests.get(url, headers=HEADERS, timeout=20, allow_redirects=True)
+        if r.status_code >= 400:
+            return ""
         return r.text[:limit]
     except Exception:
         return ""
 
-
 def pick_source_for_this_run() -> str:
-    """
-    Günde 4 run: 2 tanesi CoinGecko, 2 tanesi CryptoRank.
-    Saat bazlı deterministik: aynı gün aynı saat aynı kaynak -> daha stabil.
-    """
-    utc_hour = dt.datetime.utcnow().hour
-    return "coingecko" if utc_hour in (7, 15) else "cryptorank"
+    # deterministik: 07 & 15 UTC => CoinGecko; 11 & 19 UTC => CryptoRank
+    h = dt.datetime.utcnow().hour
+    return "coingecko" if h in (7, 15) else "cryptorank"
 
-
-def coingecko_new_projects() -> list[dict]:
-    # 1) API dene (ücretsiz çalışırsa en temiz)
+# ----------------- Sources -----------------
+def coingecko_new_projects():
+    # API dene
     try:
         r = requests.get(COINGECKO_NEW_API, headers=HEADERS, timeout=20)
         if r.status_code == 200:
-            data = r.json()  # [{id, symbol, name, activated_at}, ...]
+            data = r.json()
             out = []
-            for it in data[:50]:
+            for it in data[:80]:
                 cid = it.get("id")
-                name = it.get("name") or ""
+                name = (it.get("name") or "").strip()
                 symbol = (it.get("symbol") or "").upper()
-                # CoinGecko coin sayfası
                 url = f"https://www.coingecko.com/en/coins/{cid}" if cid else COINGECKO_NEW_WEB
-                out.append({"name": name, "symbol": symbol, "url": url})
-            return [x for x in out if x["name"]]
+                if name:
+                    out.append({"name": name, "symbol": symbol, "url": url})
+            return out
     except Exception:
         pass
 
-    # 2) Web fallback: new-cryptocurrencies sayfasından isim/coin link çek :contentReference[oaicite:4]{index=4}
-    html = fetch_text(COINGECKO_NEW_WEB, limit=120000)
+    # Web fallback
+    html = fetch_text(COINGECKO_NEW_WEB)
     if not html:
         return []
-
     soup = BeautifulSoup(html, "lxml")
-    candidates = []
+    out, seen = [], set()
     for a in soup.find_all("a", href=True):
         href = a["href"]
-        # coin sayfaları genelde /en/coins/<slug>
         if "/en/coins/" in href:
+            url = "https://www.coingecko.com" + href if href.startswith("/") else href
+            if url in seen:
+                continue
+            seen.add(url)
             name = a.get_text(" ", strip=True)
             if name and len(name) <= 40:
-                url = "https://www.coingecko.com" + href if href.startswith("/") else href
-                candidates.append({"name": name, "symbol": "", "url": url})
+                out.append({"name": name, "symbol": "", "url": url})
+    return out[:40]
 
-    # duplicate temizle
-    seen = set()
-    out = []
-    for c in candidates:
-        key = c["url"]
-        if key not in seen:
-            seen.add(key)
-            out.append(c)
-    return out[:30]
-
-
-def cryptorank_upcoming_projects() -> list[dict]:
-    html = fetch_text(CRYPTORANK_UPCOMING, limit=160000)
+def cryptorank_upcoming_projects():
+    html = fetch_text(CRYPTORANK_UPCOMING)
     if not html:
         return []
-
     soup = BeautifulSoup(html, "lxml")
-    # Sayfa dinamik olabildiği için linkleri geniş yakalıyoruz:
-    # project linkleri genelde "/price/<name>" veya "/coins/<name>" benzeri olabiliyor.
-    links = []
+    out, seen = [], set()
     for a in soup.find_all("a", href=True):
-        href = a["href"]
-        text = a.get_text(" ", strip=True)
-        if not text or len(text) > 50:
+        txt = a.get_text(" ", strip=True)
+        if not txt or len(txt) > 50:
             continue
-        if href.startswith("/"):
-            url = "https://cryptorank.io" + href
-        else:
-            url = href
-        # “upcoming-ico” sayfasında çok link var; proje linklerini kabaca filtreliyoruz
+        href = a["href"]
+        url = "https://cryptorank.io" + href if href.startswith("/") else href
+        if url in seen:
+            continue
+        seen.add(url)
         if "/price/" in url or "/coins/" in url or "/ico/" in url:
-            links.append({"name": text, "symbol": "", "url": url})
+            out.append({"name": txt, "symbol": "", "url": url})
+    return out[:40]
 
-    # duplicate temizle
-    seen = set()
-    out = []
-    for l in links:
-        key = l["url"]
-        if key not in seen:
-            seen.add(key)
-            out.append(l)
-
-    # Çok gürültü olursa ilk 30 yeter
-    return out[:30]
-
-
-def find_x_handle_from_page(url: str) -> str | None:
+def find_x_handle_from_page(url: str):
     html = fetch_text(url, limit=120000)
     if not html:
         return None
-    # x.com/<handle> veya twitter.com/<handle>
     m = re.search(r"(?:x\.com|twitter\.com)/([A-Za-z0-9_]{1,15})", html)
     if not m:
         return None
     handle = m.group(1)
-    # Bazı sayfalarda "share" vs çıkabilir; kaba blacklist
     if handle.lower() in {"share", "intent", "home"}:
         return None
     return "@" + handle
 
-
-def ai_research_tweet(project: dict, source_name: str) -> dict:
-    """
-    returns: {"tweet": "...", "image_caption": "..."}  (caption: görsel için kısa özet)
-    """
+# ----------------- AI -----------------
+def ai_research_tweet(project, source_name):
     name = project.get("name", "").strip()
     symbol = project.get("symbol", "").strip()
     url = project.get("url", "").strip()
-
     handle = find_x_handle_from_page(url) if url else None
 
     prompt = f"""
 You are a crypto Twitter researcher account.
 
 Create ONE tweet about a NEW or UPCOMING project.
-Source type: {source_name}
-Project name: {name}
+Source: {source_name}
+Project: {name}
 Symbol (may be empty): {symbol}
-Source URL: {url}
+URL: {url}
 Official X handle (may be empty): {handle or ""}
 
 Rules:
-- If handle is provided, include it EXACTLY ONCE.
-- If handle is empty, do NOT invent tags.
-- Mention the URL once.
-- Add 1 risk note without accusing (e.g., 'early', 'unclear tokenomics', 'low liquidity').
+- If handle exists, include it EXACTLY ONCE.
+- If handle empty, DO NOT invent tags.
+- Include the URL once.
+- Add 1 risk note (early/unclear tokenomics/low liquidity) without accusing.
 - No emojis, no hashtags.
 - Max 240 chars.
 
-Also output a very short image caption (<=80 chars) summarizing the key angle.
-
 Return STRICT JSON:
-{{"tweet":"...","image_caption":"..."}}
+{{"tweet":"...","caption":"..."}}
 """
     res = ai.chat.completions.create(
         model="gpt-4o-mini",
         messages=[{"role": "user", "content": prompt}],
         temperature=0.6,
     )
-    text = res.choices[0].message.content.strip()
-
-    import json
+    raw = res.choices[0].message.content.strip()
     try:
-        obj = json.loads(text)
-        tweet = (obj.get("tweet") or "").strip()
-        cap = (obj.get("image_caption") or "").strip()
-        return {"tweet": tweet[:240], "image_caption": cap[:80]}
+        obj = json.loads(raw)
+        tweet = (obj.get("tweet") or "").strip()[:240]
+        cap = (obj.get("caption") or "").strip()[:80]
+        return tweet, cap
     except Exception:
-        # fallback
-        return {"tweet": f"{name} — early project. Source: {url}".strip()[:240], "image_caption": name[:80]}
+        return f"{name} — early project. Source: {url}"[:240], name[:80]
 
-
-def make_simple_image(title: str, subtitle: str, out_path: str = "card.png") -> str:
-    # Basit 1024x1024 kart: ücretsiz, yerelde üretilir
+# ----------------- Image (free, local) -----------------
+def make_card(title: str, subtitle: str, out="card.png"):
     img = Image.new("RGB", (1024, 1024), color=(15, 15, 18))
     d = ImageDraw.Draw(img)
-
-    # Font: GitHub runner’da default font garanti değil -> PIL default kullanıyoruz
-    # Yazıları büyük/küçük basit yerleştiriyoruz
     title = title.strip()[:60]
     subtitle = subtitle.strip()[:120]
-
     d.text((64, 140), title, fill=(235, 235, 235))
-    d.text((64, 220), subtitle, fill=(190, 190, 190))
+    d.text((64, 230), subtitle, fill=(190, 190, 190))
+    d.text((64, 920), "new / upcoming project", fill=(120, 120, 120))
+    img.save(out, "PNG")
+    return out
 
-    d.text((64, 900), "auto-research bot", fill=(120, 120, 120))
-    img.save(out_path, "PNG")
-    return out_path
-
-
-def post_tweet(text: str, image_path: str | None = None):
+def post_tweet(text: str, image_path=None):
     if image_path:
-        media = x_api_v1.media_upload(image_path)  # v1.1 upload
+        media = x_api_v1.media_upload(image_path)
         x_client_v2.create_tweet(text=text, media_ids=[media.media_id_string])
     else:
         x_client_v2.create_tweet(text=text)
 
+# ----------------- Filters -----------------
+def filter_projects(projects, state):
+    today = iso_today()
+    out = []
+    for p in projects:
+        url = p.get("url") or ""
+        if not url:
+            continue
+        last = state["seen_projects"].get(url, "")
+        if last and days_ago(last) < SEEN_DAYS_PROJECT:
+            continue
+        out.append(p)
+    # fallback: hepsi elendiyse boş dönmeyelim
+    return out or projects
+
+def is_duplicate_text(text: str, state):
+    h = hash_text(text)
+    last = state["seen_text_hashes"].get(h, "")
+    return bool(last and days_ago(last) < SEEN_DAYS_TEXT)
+
+def remember_text(text: str, state):
+    h = hash_text(text)
+    state["seen_text_hashes"][h] = iso_today()
+
+def remember_project(url: str, state):
+    state["seen_projects"][url] = iso_today()
+
+# ----------------- Optional Reply (safe) -----------------
+def maybe_reply_once_per_day(state, reply_text: str):
+    # güvenli: günde 1 reply (istersen aç)
+    today = iso_today()
+    if state.get("last_reply_date") == today:
+        return
+
+    # İstersen hedefi değiştirirsin
+    target = "VitalikButerin"
+    try:
+        user = x_client_v2.get_user(username=target)
+        tweets = x_client_v2.get_users_tweets(id=user.data.id, max_results=5)
+        if tweets.data:
+            parent_id = tweets.data[0].id
+            x_client_v2.create_tweet(text=reply_text[:200], in_reply_to_tweet_id=parent_id)
+            state["last_reply_date"] = today
+    except Exception:
+        # reply başarısızsa sessiz geç
+        pass
 
 def main():
-    source = pick_source_for_this_run()
+    state = load_state()
 
+    source = pick_source_for_this_run()
     if source == "coingecko":
         projects = coingecko_new_projects()
         source_name = "CoinGecko recently added"
@@ -248,28 +266,38 @@ def main():
         source_name = "CryptoRank upcoming token sales"
 
     if not projects:
-        # kaynaklar boşsa, güvenli fallback tweet
-        post_tweet("No clean data pulled today. Skipping research post to avoid noise.")
+        # veri yoksa tweet atmayalım (noise)
+        save_state(state)
         return
 
-    # Rastgele 1 proje seç
-    project = random.choice(projects)
+    candidates = filter_projects(projects, state)
+    project = random.choice(candidates)
 
-    out = ai_research_tweet(project, source_name)
-    tweet = out["tweet"]
-    caption = out["image_caption"] or project.get("name", "New project")
+    tweet, caption = ai_research_tweet(project, source_name)
 
-    # Arada görsel: günde 4 run -> 1 tanesinde görsel (~%25)
-    with_image = (random.random() < 0.25)
+    # duplicate tweet engeli: aynı metin çıktıysa yeni proje seçip bir daha dene
+    if is_duplicate_text(tweet, state):
+        project = random.choice(candidates)
+        tweet, caption = ai_research_tweet(project, source_name)
+
+    # Görsel: günde 4 run -> sadece 1’inde görsel (UTC saate bağlı deterministik)
+    h = dt.datetime.utcnow().hour
+    with_image = (h == 7)  # sadece TR 10:00 run’ında görsel
 
     if with_image:
-        img_path = make_simple_image(project.get("name", "New Project"), caption)
-        post_tweet(tweet, image_path=img_path)
+        img = make_card(project.get("name", "New Project"), caption or "quick research")
+        post_tweet(tweet, image_path=img)
     else:
         post_tweet(tweet)
 
-    # (İstersen sonra açarız) Büyük hesaba reply - şimdilik kapalı tutuyorum
-    # çünkü reply spam riskini artırır; önce “research feed” stabil kalsın.
+    # state güncelle
+    remember_project(project.get("url", ""), state)
+    remember_text(tweet, state)
+
+    # Reply (isteğe bağlı): açmak istersen aşağıdaki satırı aktif et
+    # maybe_reply_once_per_day(state, "Solid point. The missing piece is market structure and incentives.")
+
+    save_state(state)
 
 if __name__ == "__main__":
     try:
@@ -279,4 +307,3 @@ if __name__ == "__main__":
         print("BOT FAILED:", str(e))
         traceback.print_exc()
         raise
-
