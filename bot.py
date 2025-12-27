@@ -77,6 +77,22 @@ def pick_source_for_this_run() -> str:
     # deterministik: 07 & 15 UTC => CoinGecko; 11 & 19 UTC => CryptoRank
     h = dt.datetime.utcnow().hour
     return "coingecko" if h in (7, 15) else "cryptorank"
+def normalize_url(url: str) -> str:
+    url = (url or "").strip()
+    if not url:
+        return ""
+    # boşluk varsa kırp
+    url = url.split()[0]
+    # bazen sonuna gereksiz karakter gelir
+    url = url.rstrip(").,;]}>\"'")
+    # yönlendirmeleri açıp “final” URL’yi al
+    try:
+        r = requests.head(url, headers=HEADERS, timeout=15, allow_redirects=True)
+        if r.status_code >= 400:
+            return ""
+        return r.url  # final URL
+    except Exception:
+        return ""
 
 # ----------------- Sources -----------------
 def coingecko_new_projects():
@@ -150,7 +166,7 @@ def find_x_handle_from_page(url: str):
 def ai_research_tweet(project, source_name):
     name = project.get("name", "").strip()
     symbol = project.get("symbol", "").strip()
-    url = project.get("url", "").strip()
+    url = normalize_url(project.get("url", ""))
     handle = find_x_handle_from_page(url) if url else None
 
     prompt = f"""
@@ -171,6 +187,7 @@ Rules:
 - If handle is provided, include it exactly once.
 - If handle is empty, DO NOT invent tags.
 - Be factual. If unclear, say "net değil" or "belirsiz".
+- Line 2 MUST end with the URL (place it at the very end).
 
 Project: {name}
 Symbol: {symbol}
@@ -284,6 +301,23 @@ def main():
     project = random.choice(candidates)
 
     tweet, caption = ai_research_tweet(project, source_name)
+# URL kontrol: tweet içinde link yoksa veya link boşsa tweet atma
+if not url:
+    print("Skipping: URL invalid")
+    save_state(state)
+    return
+
+# Tweet'in içinde URL yoksa, sonuna ekle
+if url not in tweet:
+    # URL'yi sona ekle (Line 2 sonu)
+    parts = [l for l in tweet.split("\n") if l.strip()]
+    if len(parts) >= 2:
+        parts[1] = parts[1].split("http")[0].strip()
+        parts[1] = (parts[1] + " " + url).strip()
+        tweet = "\n".join(parts[:3])[:240]
+    else:
+        tweet = (tweet[:200] + "\n" + url)[:240]
+
     # 3 satır garanti (main içinde)
     lines = [l.strip() for l in tweet.split("\n") if l.strip()]
     lines = lines[:3]
