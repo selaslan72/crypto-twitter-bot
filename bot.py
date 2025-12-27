@@ -154,39 +154,49 @@ def ai_research_tweet(project, source_name):
     handle = find_x_handle_from_page(url) if url else None
 
     prompt = f"""
-You are a crypto Twitter researcher account.
+You are a friendly crypto Twitter researcher.
 
-Create ONE tweet about a NEW or UPCOMING project.
-Source: {source_name}
-Project: {name}
-Symbol (may be empty): {symbol}
-URL: {url}
-Official X handle (may be empty): {handle or ""}
+Write ONE tweet in Turkish with a warm, sympathetic tone (not cringe).
+No emojis, no hashtags.
+
+The tweet MUST follow this exact 3-line format:
+
+Line 1: Mini summary (what it is / why it matters)
+Line 2: Mini summary (what to watch next / potential catalyst)
+Line 3: Risk: <one honest risk note>
 
 Rules:
-- If handle exists, include it EXACTLY ONCE.
-- If handle empty, DO NOT invent tags.
-- Include the URL once.
-- Add 1 risk note (early/unclear tokenomics/low liquidity) without accusing.
-- No emojis, no hashtags.
-- Max 240 chars.
+- Total length <= 240 characters.
+- Include the URL exactly once.
+- If handle is provided, include it exactly once.
+- If handle is empty, DO NOT invent tags.
+- Be factual. If unclear, say "net değil" or "belirsiz".
+
+Project: {name}
+Symbol: {symbol}
+URL: {url}
+Handle: {handle or "none"}
 
 Return STRICT JSON:
 {{"tweet":"...","caption":"..."}}
 """
+
     res = ai.chat.completions.create(
         model="gpt-4o-mini",
         messages=[{"role": "user", "content": prompt}],
-        temperature=0.6,
+        temperature=0.65,
     )
+
     raw = res.choices[0].message.content.strip()
+
     try:
         obj = json.loads(raw)
-        tweet = (obj.get("tweet") or "").strip()[:240]
-        cap = (obj.get("caption") or "").strip()[:80]
-        return tweet, cap
+        tweet = obj.get("tweet", "").strip()[:240]
+        caption = obj.get("caption", "").strip()[:70]
+        return tweet, caption
     except Exception:
-        return f"{name} — early project. Source: {url}"[:240], name[:80]
+        fallback = f"{name}\nTakip: {url}\nRisk: erken aşama / detaylar net değil"
+        return fallback[:240], name[:70]
 
 # ----------------- Image (free, local) -----------------
 def make_card(title: str, subtitle: str, out="card.png"):
@@ -274,6 +284,15 @@ def main():
     project = random.choice(candidates)
 
     tweet, caption = ai_research_tweet(project, source_name)
+# 3 satır garanti: fazla satır varsa kırp, azsa tamamla
+lines = [l.strip() for l in tweet.split("\n") if l.strip()]
+lines = lines[:3]
+while len(lines) < 3:
+    if len(lines) == 2:
+        lines.append("Risk: detaylar net değil / erken aşama")
+    else:
+        lines.append("Takip: " + (project.get("url","") or ""))
+tweet = "\n".join(lines)[:240]
 
     # duplicate tweet engeli: aynı metin çıktıysa yeni proje seçip bir daha dene
     if is_duplicate_text(tweet, state):
