@@ -285,7 +285,7 @@ def main():
 
     tweet, caption = ai_research_tweet(project, source_name)
 
-# 3 satır garanti
+# 3 satır garanti (BURASI main İÇİNDE!)
 lines = [l.strip() for l in tweet.split("\n") if l.strip()]
 lines = lines[:3]
 while len(lines) < 3:
@@ -293,7 +293,9 @@ while len(lines) < 3:
         lines.append("Risk: detaylar net değil / erken aşama")
     else:
         lines.append("Takip: " + (project.get("url","") or ""))
-tweet = "\n".join(lines)[:240]
+    tweet = "\n".join(lines)[:240]
+
+
 
 # duplicate tweet engeli
 if is_duplicate_text(tweet, state):
