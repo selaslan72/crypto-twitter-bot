@@ -302,9 +302,11 @@ def main():
 
     tweet, caption = ai_research_tweet(project, source_name)
 # URL kontrol: tweet içinde link yoksa veya link boşsa tweet atma
-if not url:
-    print("Skipping: URL invalid")
-    save_state(state)
+    # 🔹 URL geçerli mi?
+    url = project["url"]
+    if not url:
+        print("Skipping: URL invalid")
+        save_state(state)
         return
 
 # Tweet'in içinde URL yoksa, sonuna ekle
