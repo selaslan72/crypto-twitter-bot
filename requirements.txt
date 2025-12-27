@@ -1,2 +1,6 @@
 tweepy
 openai
+requests
+beautifulsoup4
+lxml
+pillow
