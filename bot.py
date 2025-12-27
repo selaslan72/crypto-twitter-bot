@@ -228,11 +228,17 @@ def make_card(title: str, subtitle: str, out="card.png"):
     return out
 
 def post_tweet(text: str, image_path=None):
-    if image_path:
-        media = x_api_v1.media_upload(image_path)
-        x_client_v2.create_tweet(text=text, media_ids=[media.media_id_string])
-    else:
-        x_client_v2.create_tweet(text=text)
+    try:
+        if image_path:
+            media = x_api_v1.media_upload(image_path)
+            x_client_v2.create_tweet(text=text, media_ids=[media.media_id_string])
+        else:
+            x_client_v2.create_tweet(text=text)
+        return True
+    except tweepy.errors.Forbidden as e:
+        print("X FORBIDDEN 403:", str(e))
+        return False
+
 
 # ----------------- Filters -----------------
 def filter_projects(projects, state):
