@@ -305,7 +305,7 @@ def main():
 if not url:
     print("Skipping: URL invalid")
     save_state(state)
-    return
+        return
 
 # Tweet'in içinde URL yoksa, sonuna ekle
 if url not in tweet:
