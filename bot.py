@@ -301,24 +301,22 @@ def main():
     project = random.choice(candidates)
 
     tweet, caption = ai_research_tweet(project, source_name)
-# URL kontrol: tweet içinde link yoksa veya link boşsa tweet atma
-    # 🔹 URL geçerli mi?
-    url = project["url"]
+        # 🔹 URL geçerli mi?
+    url = project.get("url", "")
     if not url:
         print("Skipping: URL invalid")
         save_state(state)
         return
 
-# Tweet'in içinde URL yoksa, sonuna ekle
-if url not in tweet:
-    # URL'yi sona ekle (Line 2 sonu)
-    parts = [l for l in tweet.split("\n") if l.strip()]
-    if len(parts) >= 2:
-        parts[1] = parts[1].split("http")[0].strip()
-        parts[1] = (parts[1] + " " + url).strip()
-        tweet = "\n".join(parts[:3])[:240]
-    else:
-        tweet = (tweet[:200] + "\n" + url)[:240]
+    # 🔹 Tweet içinde URL yoksa düzelt
+    if url not in tweet:
+        parts = [l for l in tweet.split("\n") if l.strip()]
+        if len(parts) >= 2:
+            parts[1] = parts[1].split("http")[0].strip()
+            parts[1] = (parts[1] + " " + url).strip()
+            tweet = "\n".join(parts[:3])[:240]
+        else:
+            tweet = (tweet[:200] + "\n" + url)[:240]
 
     # 3 satır garanti (main içinde)
     lines = [l.strip() for l in tweet.split("\n") if l.strip()]
