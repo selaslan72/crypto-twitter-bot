@@ -295,10 +295,10 @@ def main():
     tweet = "\n".join(lines)[:240]
 
 
-# duplicate tweet engeli
-if is_duplicate_text(tweet, state):
-    project = random.choice(candidates)
-    tweet, caption = ai_research_tweet(project, source_name)
+    # duplicate tweet engeli
+    if is_duplicate_text(tweet, state):
+        project = random.choice(candidates)
+        tweet, caption = ai_research_tweet(project, source_name)
 
 
     # Görsel: günde 4 run -> sadece 1’inde görsel (UTC saate bağlı deterministik)
