@@ -272,5 +272,11 @@ def main():
     # çünkü reply spam riskini artırır; önce “research feed” stabil kalsın.
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as e:
+        import traceback
+        print("BOT FAILED:", str(e))
+        traceback.print_exc()
+        raise
 
