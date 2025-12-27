@@ -284,7 +284,8 @@ def main():
     project = random.choice(candidates)
 
     tweet, caption = ai_research_tweet(project, source_name)
-# 3 satır garanti: fazla satır varsa kırp, azsa tamamla
+
+# 3 satır garanti
 lines = [l.strip() for l in tweet.split("\n") if l.strip()]
 lines = lines[:3]
 while len(lines) < 3:
@@ -294,10 +295,11 @@ while len(lines) < 3:
         lines.append("Takip: " + (project.get("url","") or ""))
 tweet = "\n".join(lines)[:240]
 
-    # duplicate tweet engeli: aynı metin çıktıysa yeni proje seçip bir daha dene
-    if is_duplicate_text(tweet, state):
-        project = random.choice(candidates)
-        tweet, caption = ai_research_tweet(project, source_name)
+# duplicate tweet engeli
+if is_duplicate_text(tweet, state):
+    project = random.choice(candidates)
+    tweet, caption = ai_research_tweet(project, source_name)
+
 
     # Görsel: günde 4 run -> sadece 1’inde görsel (UTC saate bağlı deterministik)
     h = dt.datetime.utcnow().hour
