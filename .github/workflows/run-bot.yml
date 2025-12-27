@@ -2,11 +2,10 @@ name: Crypto Twitter Bot
 
 on:
   workflow_dispatch:
-  schedule:
-    # Türkiye saati için not: GitHub Actions cron UTC çalışır.
-    # 3-4 tweet için günde 2 kez çalıştırıp her çalışmada 2 tweet atmak da mümkün.
-    # Şimdilik günde 1 kez çalıştıralım (test).
-    - cron: "0 7 * * *"   # UTC 07:00 = TR 10:00
+
+permissions:
+  contents: read
+  models: read   # GitHub Models için şart
 
 jobs:
   run:
@@ -23,6 +22,12 @@ jobs:
 
       - name: Run bot
         env:
+          # GitHub Models için Actions'ın kendi token'ı
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          X_BEARER_TOKEN: ${{ secrets.X_BEARER_TOKEN }}
+
+          # X OAuth 1.0a (senin oluşturduğun)
+          X_API_KEY: ${{ secrets.X_API_KEY }}
+          X_API_SECRET: ${{ secrets.X_API_SECRET }}
+          X_ACCESS_TOKEN: ${{ secrets.X_ACCESS_TOKEN }}
+          X_ACCESS_TOKEN_SECRET: ${{ secrets.X_ACCESS_TOKEN_SECRET }}
         run: python bot.py
