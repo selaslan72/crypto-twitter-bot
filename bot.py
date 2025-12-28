@@ -280,12 +280,12 @@ def make_card(title: str, subtitle: str, out="card.png"):
 
 
 def post_tweet(text: str, image_path=None) -> bool:
-    try:
-        import time
+    import time
 import tweepy
 
 def post_tweet(text: str, image_path=None) -> bool:
-    for attempt in range(2):  # 1 retry
+    # 1 kez retry
+    for attempt in range(2):
         try:
             if image_path:
                 media = x_api_v1.media_upload(image_path)
@@ -296,25 +296,27 @@ def post_tweet(text: str, image_path=None) -> bool:
             tid = resp.data.get("id") if resp and resp.data else None
             if tid:
                 print("TWEET_LINK:", f"https://x.com/i/web/status/{tid}", flush=True)
+
             print("Tweet sent OK", flush=True)
             return True
 
         except tweepy.errors.TooManyRequests as e:
-            # X rate limit: bekle ve tekrar dene
+            # Rate limit -> bekle ve tekrar dene
             wait_s = 910
             try:
-                ra = getattr(e.response, "headers", {}).get("x-rate-limit-reset")
-                if ra:
-                    # reset epoch ise, kabaca hesapla
-                    wait_s = max(30, int(ra) - int(time.time()) + 5)
+                headers = getattr(e.response, "headers", {}) or {}
+                reset = headers.get("x-rate-limit-reset")
+                if reset:
+                    wait_s = max(30, int(reset) - int(time.time()) + 5)
             except Exception:
                 pass
+
             print(f"RATE_LIMIT: sleeping {wait_s}s", flush=True)
             time.sleep(wait_s)
             continue
 
         except tweepy.errors.Forbidden as e:
-            # 403 = yetki/plan/policy. Retry çoğunlukla boşa.
+            # 403 -> retry işe yaramaz
             print("X_FORBIDDEN_403:", str(e), flush=True)
             return False
 
