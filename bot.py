@@ -281,19 +281,42 @@ def make_card(title: str, subtitle: str, out="card.png"):
 
 def post_tweet(text: str, image_path=None) -> bool:
     try:
+        # Hangi hesap? (v2)
+        try:
+            me = x_client_v2.get_me()
+            print("X_ACCOUNT:", me.data, flush=True)
+        except Exception as e:
+            print("X_ACCOUNT_CHECK_FAIL:", repr(e), flush=True)
+
         if image_path:
             media = x_api_v1.media_upload(image_path)
-            x_client_v2.create_tweet(text=text, media_ids=[media.media_id_string])
+            resp = x_client_v2.create_tweet(text=text, media_ids=[media.media_id_string])
         else:
-            x_client_v2.create_tweet(text=text)
-        log("Tweet sent OK")
+            resp = x_client_v2.create_tweet(text=text)
+
+        # Tweet ID + link bas
+        tid = None
+        try:
+            tid = resp.data.get("id") if resp and resp.data else None
+        except Exception:
+            tid = None
+
+        print("CREATE_TWEET_RESPONSE:", resp.data if hasattr(resp, "data") else resp, flush=True)
+
+        if tid:
+            print("TWEET_ID:", tid, flush=True)
+            print("TWEET_LINK:", f"https://x.com/i/web/status/{tid}", flush=True)
+
+        print("Tweet sent OK", flush=True)
         return True
+
     except tweepy.errors.Forbidden as e:
         print("X FORBIDDEN 403:", str(e), flush=True)
         return False
     except Exception as e:
         print("TWEET ERROR:", repr(e), flush=True)
         return False
+
 
 
 # ----------------- Filters -----------------
