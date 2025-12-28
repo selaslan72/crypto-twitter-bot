@@ -7,13 +7,26 @@ from PIL import Image, ImageDraw
 import tweepy
 from openai import OpenAI
 
+# ========= Settings =========
+DEBUG = os.getenv("DEBUG", "0") == "1"
+
+HEADERS = {"User-Agent": "Mozilla/5.0 (crypto-bot)"}
+
+COINGECKO_NEW_API = "https://api.coingecko.com/api/v3/coins/list/new"
+COINGECKO_NEW_WEB = "https://www.coingecko.com/en/new-cryptocurrencies"
+CRYPTORANK_UPCOMING = "https://cryptorank.io/upcoming-ico"
+
+STATE_PATH = "state.json"
+SEEN_DAYS_PROJECT = int(os.getenv("SEEN_DAYS_PROJECT", "7"))
+SEEN_DAYS_TEXT = int(os.getenv("SEEN_DAYS_TEXT", "2"))
+
 # ========= AI (GitHub Models) =========
 ai = OpenAI(
     base_url="https://models.github.ai/inference",
     api_key=os.environ["GITHUB_TOKEN"],
 )
 
-# ========= X Auth (OAuth 1.0a) =========
+# ========= X Auth =========
 auth = tweepy.OAuth1UserHandler(
     consumer_key=os.environ["X_API_KEY"],
     consumer_secret=os.environ["X_API_SECRET"],
@@ -26,17 +39,14 @@ x_client_v2 = tweepy.Client(
     consumer_secret=os.environ["X_API_SECRET"],
     access_token=os.environ["X_ACCESS_TOKEN"],
     access_token_secret=os.environ["X_ACCESS_TOKEN_SECRET"],
+    wait_on_rate_limit=True,
 )
 
-HEADERS = {"User-Agent": "Mozilla/5.0 (crypto-bot)"}
 
-COINGECKO_NEW_API = "https://api.coingecko.com/api/v3/coins/list/new"
-COINGECKO_NEW_WEB = "https://www.coingecko.com/en/new-cryptocurrencies"
-CRYPTORANK_UPCOMING = "https://cryptorank.io/upcoming-ico"
+def log(*args):
+    if DEBUG:
+        print(*args, flush=True)
 
-STATE_PATH = "state.json"
-SEEN_DAYS_PROJECT = 7
-SEEN_DAYS_TEXT = 2  # aynı metin 2 gün içinde tekrar olmasın
 
 # ----------------- State -----------------
 def load_state():
@@ -46,12 +56,15 @@ def load_state():
     except Exception:
         return {"seen_projects": {}, "seen_text_hashes": {}, "last_reply_date": ""}
 
+
 def save_state(state):
     with open(STATE_PATH, "w", encoding="utf-8") as f:
         json.dump(state, f, ensure_ascii=False, indent=2)
 
+
 def iso_today():
     return dt.datetime.utcnow().date().isoformat()
+
 
 def days_ago(iso_date: str) -> int:
     try:
@@ -60,8 +73,26 @@ def days_ago(iso_date: str) -> int:
     except Exception:
         return 9999
 
+
 def hash_text(s: str) -> str:
     return hashlib.sha256(s.encode("utf-8")).hexdigest()[:16]
+
+
+def remember_text(text: str, state):
+    h = hash_text(text)
+    state["seen_text_hashes"][h] = iso_today()
+
+
+def remember_project(url: str, state):
+    if url:
+        state["seen_projects"][url] = iso_today()
+
+
+def is_duplicate_text(text: str, state):
+    h = hash_text(text)
+    last = state["seen_text_hashes"].get(h, "")
+    return bool(last and days_ago(last) < SEEN_DAYS_TEXT)
+
 
 # ----------------- Helpers -----------------
 def fetch_text(url: str, limit: int = 120000) -> str:
@@ -73,26 +104,43 @@ def fetch_text(url: str, limit: int = 120000) -> str:
     except Exception:
         return ""
 
+
 def pick_source_for_this_run() -> str:
     # deterministik: 07 & 15 UTC => CoinGecko; 11 & 19 UTC => CryptoRank
     h = dt.datetime.utcnow().hour
     return "coingecko" if h in (7, 15) else "cryptorank"
+
+
 def normalize_url(url: str) -> str:
+    """
+    URL'yi mümkünse redirect sonrası final haline getirir.
+    HEAD/GET başarısız olursa URL'yi boş yapmaz; olduğu gibi bırakır.
+    """
     url = (url or "").strip()
     if not url:
         return ""
-    # boşluk varsa kırp
     url = url.split()[0]
-    # bazen sonuna gereksiz karakter gelir
     url = url.rstrip(").,;]}>\"'")
-    # yönlendirmeleri açıp “final” URL’yi al
+
+    # HEAD dene
     try:
-        r = requests.head(url, headers=HEADERS, timeout=15, allow_redirects=True)
-        if r.status_code >= 400:
-            return ""
-        return r.url  # final URL
+        r = requests.head(url, headers=HEADERS, timeout=12, allow_redirects=True)
+        if r.status_code < 400 and r.url:
+            return r.url
     except Exception:
-        return ""
+        pass
+
+    # GET dene
+    try:
+        r = requests.get(url, headers=HEADERS, timeout=12, allow_redirects=True)
+        if r.status_code < 400 and r.url:
+            return r.url
+    except Exception:
+        pass
+
+    # Son çare: URL'yi olduğu gibi döndür
+    return url
+
 
 # ----------------- Sources -----------------
 def coingecko_new_projects():
@@ -131,6 +179,7 @@ def coingecko_new_projects():
                 out.append({"name": name, "symbol": "", "url": url})
     return out[:40]
 
+
 def cryptorank_upcoming_projects():
     html = fetch_text(CRYPTORANK_UPCOMING)
     if not html:
@@ -150,6 +199,7 @@ def cryptorank_upcoming_projects():
             out.append({"name": txt, "symbol": "", "url": url})
     return out[:40]
 
+
 def find_x_handle_from_page(url: str):
     html = fetch_text(url, limit=120000)
     if not html:
@@ -162,11 +212,12 @@ def find_x_handle_from_page(url: str):
         return None
     return "@" + handle
 
+
 # ----------------- AI -----------------
 def ai_research_tweet(project, source_name):
     name = project.get("name", "").strip()
     symbol = project.get("symbol", "").strip()
-    url = normalize_url(project.get("url", ""))
+    url = project.get("url", "").strip()
     handle = find_x_handle_from_page(url) if url else None
 
     prompt = f"""
@@ -176,9 +227,8 @@ Write ONE tweet in Turkish with a warm, sympathetic tone (not cringe).
 No emojis, no hashtags.
 
 The tweet MUST follow this exact 3-line format:
-
 Line 1: Mini summary (what it is / why it matters)
-Line 2: Mini summary (what to watch next / potential catalyst)
+Line 2: Mini summary (what to watch next / potential catalyst) AND MUST end with the URL
 Line 3: Risk: <one honest risk note>
 
 Rules:
@@ -204,16 +254,17 @@ Return STRICT JSON:
         temperature=0.65,
     )
 
-    raw = res.choices[0].message.content.strip()
+    raw = (res.choices[0].message.content or "").strip()
 
     try:
         obj = json.loads(raw)
-        tweet = obj.get("tweet", "").strip()[:240]
-        caption = obj.get("caption", "").strip()[:70]
+        tweet = (obj.get("tweet", "") or "").replace("\r", "").strip()[:240]
+        caption = (obj.get("caption", "") or "").strip()[:70]
         return tweet, caption
     except Exception:
         fallback = f"{name}\nTakip: {url}\nRisk: erken aşama / detaylar net değil"
         return fallback[:240], name[:70]
+
 
 # ----------------- Image (free, local) -----------------
 def make_card(title: str, subtitle: str, out="card.png"):
@@ -227,65 +278,59 @@ def make_card(title: str, subtitle: str, out="card.png"):
     img.save(out, "PNG")
     return out
 
-def post_tweet(text: str, image_path=None):
+
+def post_tweet(text: str, image_path=None) -> bool:
     try:
         if image_path:
             media = x_api_v1.media_upload(image_path)
             x_client_v2.create_tweet(text=text, media_ids=[media.media_id_string])
         else:
             x_client_v2.create_tweet(text=text)
+        log("Tweet sent OK")
         return True
     except tweepy.errors.Forbidden as e:
-        print("X FORBIDDEN 403:", str(e))
+        print("X FORBIDDEN 403:", str(e), flush=True)
+        return False
+    except Exception as e:
+        print("TWEET ERROR:", repr(e), flush=True)
         return False
 
 
 # ----------------- Filters -----------------
 def filter_projects(projects, state):
-    today = iso_today()
     out = []
     for p in projects:
-        url = p.get("url") or ""
+        url = (p.get("url") or "").strip()
         if not url:
             continue
         last = state["seen_projects"].get(url, "")
         if last and days_ago(last) < SEEN_DAYS_PROJECT:
             continue
         out.append(p)
-    # fallback: hepsi elendiyse boş dönmeyelim
     return out or projects
 
-def is_duplicate_text(text: str, state):
-    h = hash_text(text)
-    last = state["seen_text_hashes"].get(h, "")
-    return bool(last and days_ago(last) < SEEN_DAYS_TEXT)
 
-def remember_text(text: str, state):
-    h = hash_text(text)
-    state["seen_text_hashes"][h] = iso_today()
+def enforce_3_lines_and_url(tweet: str, url: str) -> str:
+    lines = [l.strip() for l in (tweet or "").split("\n") if l.strip()]
+    lines = lines[:3]
 
-def remember_project(url: str, state):
-    state["seen_projects"][url] = iso_today()
+    while len(lines) < 3:
+        if len(lines) == 2:
+            lines.append("Risk: detaylar net değil / erken aşama")
+        else:
+            lines.append("Takip:")
 
-# ----------------- Optional Reply (safe) -----------------
-def maybe_reply_once_per_day(state, reply_text: str):
-    # güvenli: günde 1 reply (istersen aç)
-    today = iso_today()
-    if state.get("last_reply_date") == today:
-        return
+    # URL line2 sonu
+    if url:
+        l2 = lines[1].split("http")[0].strip()
+        lines[1] = (l2 + " " + url).strip()
 
-    # İstersen hedefi değiştirirsin
-    target = "VitalikButerin"
-    try:
-        user = x_client_v2.get_user(username=target)
-        tweets = x_client_v2.get_users_tweets(id=user.data.id, max_results=5)
-        if tweets.data:
-            parent_id = tweets.data[0].id
-            x_client_v2.create_tweet(text=reply_text[:200], in_reply_to_tweet_id=parent_id)
-            state["last_reply_date"] = today
-    except Exception:
-        # reply başarısızsa sessiz geç
-        pass
+    # Risk satırı garanti
+    if not lines[2].lower().startswith("risk"):
+        lines[2] = ("Risk: " + lines[2]).strip()
+
+    return "\n".join(lines)[:240]
+
 
 def main():
     state = load_state()
@@ -298,73 +343,92 @@ def main():
         projects = cryptorank_upcoming_projects()
         source_name = "CryptoRank upcoming token sales"
 
+    log("SOURCE:", source, "PROJECTS:", len(projects))
+
     if not projects:
-        # veri yoksa tweet atmayalım (noise)
+        print("No projects found. Exiting.", flush=True)
         save_state(state)
         return
 
     candidates = filter_projects(projects, state)
     project = random.choice(candidates)
 
-    tweet, caption = ai_research_tweet(project, source_name)
-        # 🔹 URL geçerli mi?
-    url = project.get("url", "")
+    # URL'yi burada normalize et ve project'e yaz (tek kaynak gerçeği)
+    project["url"] = normalize_url(project.get("url", ""))
+    url = project.get("url", "").strip()
+
+    log("PICKED:", project.get("name"), url)
+
+    # URL tamamen boşsa: tweet atma (ama log bas)
     if not url:
-        print("Skipping: URL invalid")
+        print("Skipping: URL invalid/empty after normalization", flush=True)
         save_state(state)
         return
 
-    # 🔹 Tweet içinde URL yoksa düzelt
-    if url not in tweet:
-        parts = [l for l in tweet.split("\n") if l.strip()]
-        if len(parts) >= 2:
-            parts[1] = parts[1].split("http")[0].strip()
-            parts[1] = (parts[1] + " " + url).strip()
-            tweet = "\n".join(parts[:3])[:240]
-        else:
-            tweet = (tweet[:200] + "\n" + url)[:240]
+    # Tweet üret
+    tweet, caption = ai_research_tweet(project, source_name)
 
-    # 3 satır garanti (main içinde)
-    lines = [l.strip() for l in tweet.split("\n") if l.strip()]
-    lines = lines[:3]
-    while len(lines) < 3:
-        if len(lines) == 2:
-            lines.append("Risk: detaylar net değil / erken aşama")
-        else:
-            lines.append("Takip: " + (project.get("url","") or ""))
-    tweet = "\n".join(lines)[:240]
+    # 3 satır + URL düzelt
+    tweet = enforce_3_lines_and_url(tweet, url)
 
+    log("TWEET_DRAFT:\n" + tweet)
 
-    # duplicate tweet engeli
+    # Duplicate text ise 1 kere yeniden üret
     if is_duplicate_text(tweet, state):
-        project = random.choice(candidates)
-        tweet, caption = ai_research_tweet(project, source_name)
+        log("Duplicate text detected. Regenerating once...")
+        tweet2, caption2 = ai_research_tweet(project, source_name)
+        tweet2 = enforce_3_lines_and_url(tweet2, url)
+        if not is_duplicate_text(tweet2, state):
+            tweet, caption = tweet2, caption2
+            log("Regenerated tweet accepted.")
+        else:
+            print("Skipping: duplicate text after regeneration", flush=True)
+            save_state(state)
+            return
 
-
-    # Görsel: günde 4 run -> sadece 1’inde görsel (UTC saate bağlı deterministik)
+    # Görsel: sadece UTC 07:00 (TR 10:00)
     h = dt.datetime.utcnow().hour
-    with_image = (h == 7)  # sadece TR 10:00 run’ında görsel
+    with_image = (h == 7)
 
+    success = False
     if with_image:
         img = make_card(project.get("name", "New Project"), caption or "quick research")
-        post_tweet(tweet, image_path=img)
+        success = post_tweet(tweet, image_path=img)
     else:
-        post_tweet(tweet)
+        success = post_tweet(tweet)
+
+    # 403/duplicate vb. için 1 retry
+    if not success:
+        log("Post failed. Retrying once with new text...")
+        tweet2, caption2 = ai_research_tweet(project, source_name)
+        tweet2 = enforce_3_lines_and_url(tweet2, url)
+
+        if with_image:
+            img = make_card(project.get("name", "New Project"), caption2 or "quick research")
+            success = post_tweet(tweet2, image_path=img)
+        else:
+            success = post_tweet(tweet2)
+
+        if success:
+            tweet, caption = tweet2, caption2
+
+    if not success:
+        print("Skipping: could not post after retry", flush=True)
+        save_state(state)
+        return
 
     # state güncelle
-    remember_project(project.get("url", ""), state)
+    remember_project(url, state)
     remember_text(tweet, state)
-
-    # Reply (isteğe bağlı): açmak istersen aşağıdaki satırı aktif et
-    # maybe_reply_once_per_day(state, "Solid point. The missing piece is market structure and incentives.")
-
     save_state(state)
+
 
 if __name__ == "__main__":
     try:
         main()
     except Exception as e:
         import traceback
-        print("BOT FAILED:", str(e))
+
+        print("BOT FAILED:", str(e), flush=True)
         traceback.print_exc()
         raise
