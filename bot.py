@@ -281,41 +281,51 @@ def make_card(title: str, subtitle: str, out="card.png"):
 
 def post_tweet(text: str, image_path=None) -> bool:
     try:
-        # Hangi hesap? (v2)
-        try:
-            me = x_client_v2.get_me()
-            print("X_ACCOUNT:", me.data, flush=True)
-        except Exception as e:
-            print("X_ACCOUNT_CHECK_FAIL:", repr(e), flush=True)
+        import time
+import tweepy
 
-        if image_path:
-            media = x_api_v1.media_upload(image_path)
-            resp = x_client_v2.create_tweet(text=text, media_ids=[media.media_id_string])
-        else:
-            resp = x_client_v2.create_tweet(text=text)
-
-        # Tweet ID + link bas
-        tid = None
+def post_tweet(text: str, image_path=None) -> bool:
+    for attempt in range(2):  # 1 retry
         try:
+            if image_path:
+                media = x_api_v1.media_upload(image_path)
+                resp = x_client_v2.create_tweet(text=text, media_ids=[media.media_id_string])
+            else:
+                resp = x_client_v2.create_tweet(text=text)
+
             tid = resp.data.get("id") if resp and resp.data else None
-        except Exception:
-            tid = None
+            if tid:
+                print("TWEET_LINK:", f"https://x.com/i/web/status/{tid}", flush=True)
+            print("Tweet sent OK", flush=True)
+            return True
 
-        print("CREATE_TWEET_RESPONSE:", resp.data if hasattr(resp, "data") else resp, flush=True)
+        except tweepy.errors.TooManyRequests as e:
+            # X rate limit: bekle ve tekrar dene
+            wait_s = 910
+            try:
+                ra = getattr(e.response, "headers", {}).get("x-rate-limit-reset")
+                if ra:
+                    # reset epoch ise, kabaca hesapla
+                    wait_s = max(30, int(ra) - int(time.time()) + 5)
+            except Exception:
+                pass
+            print(f"RATE_LIMIT: sleeping {wait_s}s", flush=True)
+            time.sleep(wait_s)
+            continue
 
-        if tid:
-            print("TWEET_ID:", tid, flush=True)
-            print("TWEET_LINK:", f"https://x.com/i/web/status/{tid}", flush=True)
+        except tweepy.errors.Forbidden as e:
+            # 403 = yetki/plan/policy. Retry çoğunlukla boşa.
+            print("X_FORBIDDEN_403:", str(e), flush=True)
+            return False
 
-        print("Tweet sent OK", flush=True)
-        return True
+        except Exception as e:
+            print("TWEET_ERROR:", repr(e), flush=True)
+            if attempt == 0:
+                time.sleep(5)
+                continue
+            return False
 
-    except tweepy.errors.Forbidden as e:
-        print("X FORBIDDEN 403:", str(e), flush=True)
-        return False
-    except Exception as e:
-        print("TWEET ERROR:", repr(e), flush=True)
-        return False
+    return False
 
 
 
