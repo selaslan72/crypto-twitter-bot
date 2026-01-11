@@ -279,12 +279,11 @@ def make_card(title: str, subtitle: str, out="card.png"):
     return out
 
 
+# ----------------- X Posting -----------------
 def post_tweet(text: str, image_path=None) -> bool:
     import time
-import tweepy
 
-def post_tweet(text: str, image_path=None) -> bool:
-    # 1 kez retry
+    # 1 kez retry (toplam 2 deneme)
     for attempt in range(2):
         try:
             if image_path:
@@ -328,7 +327,6 @@ def post_tweet(text: str, image_path=None) -> bool:
             return False
 
     return False
-
 
 
 # ----------------- Filters -----------------
@@ -380,41 +378,39 @@ def main():
 
     log("SOURCE:", source, "PROJECTS:", len(projects))
 
-    # If no eligible projects were found, post a fallback tweet instead of exiting silently.
-if not projects:
-    fallback_tweet = (
-        "Today’s feed is quiet, so here’s the watchlist:\n"
-        "• Fermah\n"
-        "• Netrum\n"
-        "• OpenMind\n"
-        "• TOKI Finance\n\n"
-        "If you spot an update, drop it in the replies. Not financial advice."
-    )
-
-    try:
-        # IMPORTANT: replace `post_tweet` with your actual function name if different.
-        # e.g. twitter_client.post_tweet(...), create_tweet(...), publish_tweet(...), etc.
-        post_tweet(fallback_tweet)
-        print("SUMMARY: attempted=1 posted=1 reason=FALLBACK_NO_PROJECTS")
-    except Exception as e:
-        # If publishing fails, fail the run so you notice it immediately.
-        print(f"FATAL: failed to post fallback tweet: {e}")
-        raise
-
-    return
+    # --- Fallback: hiç proje gelmezse bile 1 tweet at ---
+    if not projects:
+        today = iso_today()
+        fallback_tweet = (
+            f"Gün sakin görünüyor ({today}). Takip listem:\n"
+            "• Fermah\n"
+            "• Netrum\n"
+            "• OpenMind\n"
+            "• TOKI Finance\n\n"
+            "Risk: bilgi akışı sınırlı olabilir / erken aşama"
+        )
+        ok = post_tweet(fallback_tweet)
+        if ok:
+            remember_text(fallback_tweet, state)
+            save_state(state)
+            print("SUMMARY: attempted=1 posted=1 reason=FALLBACK_NO_PROJECTS", flush=True)
+        else:
+            print("SUMMARY: attempted=1 posted=0 reason=FALLBACK_POST_FAILED", flush=True)
+            save_state(state)
+        return
 
     candidates = filter_projects(projects, state)
     project = random.choice(candidates)
 
-    # URL'yi burada normalize et ve project'e yaz (tek kaynak gerçeği)
+    # URL'yi normalize et ve project'e yaz
     project["url"] = normalize_url(project.get("url", ""))
     url = project.get("url", "").strip()
 
     log("PICKED:", project.get("name"), url)
 
-    # URL tamamen boşsa: tweet atma (ama log bas)
+    # URL tamamen boşsa: tweet atma (ama summary bas)
     if not url:
-        print("Skipping: URL invalid/empty after normalization", flush=True)
+        print("SUMMARY: attempted=1 posted=0 reason=URL_EMPTY_AFTER_NORMALIZE", flush=True)
         save_state(state)
         return
 
@@ -435,7 +431,7 @@ if not projects:
             tweet, caption = tweet2, caption2
             log("Regenerated tweet accepted.")
         else:
-            print("Skipping: duplicate text after regeneration", flush=True)
+            print("SUMMARY: attempted=1 posted=0 reason=DUPLICATE_TEXT_AFTER_RETRY", flush=True)
             save_state(state)
             return
 
@@ -450,7 +446,7 @@ if not projects:
     else:
         success = post_tweet(tweet)
 
-    # 403/duplicate vb. için 1 retry
+    # 1 retry
     if not success:
         log("Post failed. Retrying once with new text...")
         tweet2, caption2 = ai_research_tweet(project, source_name)
@@ -466,7 +462,7 @@ if not projects:
             tweet, caption = tweet2, caption2
 
     if not success:
-        print("Skipping: could not post after retry", flush=True)
+        print("SUMMARY: attempted=1 posted=0 reason=POST_FAILED_AFTER_RETRY", flush=True)
         save_state(state)
         return
 
@@ -474,6 +470,7 @@ if not projects:
     remember_project(url, state)
     remember_text(tweet, state)
     save_state(state)
+    print("SUMMARY: attempted=1 posted=1 reason=NORMAL", flush=True)
 
 
 if __name__ == "__main__":
@@ -481,7 +478,6 @@ if __name__ == "__main__":
         main()
     except Exception as e:
         import traceback
-
         print("BOT FAILED:", str(e), flush=True)
         traceback.print_exc()
         raise
