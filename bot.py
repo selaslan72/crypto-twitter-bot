@@ -2,7 +2,9 @@ import os, re, json, random, hashlib
 import datetime as dt
 import requests
 from bs4 import BeautifulSoup
-from PIL import Image, ImageDraw, from PIL import ImageFont
+from PIL import Image, ImageDraw, 
+from PIL import ImageFont
+
 # ----------------- Image (card) -----------------
 def _wrap_lines(text: str, max_chars: int):
     """
