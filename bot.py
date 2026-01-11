@@ -1,5 +1,7 @@
 import os, re, json, random, hashlib
 import datetime as dt
+from typing import Optional, List, Dict, Any, Tuple
+
 import requests
 from bs4 import BeautifulSoup
 from PIL import Image, ImageDraw, ImageFont
@@ -9,16 +11,21 @@ from openai import OpenAI
 
 # ========= Settings =========
 DEBUG = os.getenv("DEBUG", "0") == "1"
-
 HEADERS = {"User-Agent": "Mozilla/5.0 (crypto-bot)"}
-
-COINGECKO_NEW_API = "https://api.coingecko.com/api/v3/coins/list/new"
-COINGECKO_NEW_WEB = "https://www.coingecko.com/en/new-cryptocurrencies"
-CRYPTORANK_UPCOMING = "https://cryptorank.io/upcoming-ico"
 
 STATE_PATH = "state.json"
 SEEN_DAYS_PROJECT = int(os.getenv("SEEN_DAYS_PROJECT", "7"))
 SEEN_DAYS_TEXT = int(os.getenv("SEEN_DAYS_TEXT", "2"))
+
+# ========= Sources =========
+COINGECKO_NEW_API = "https://api.coingecko.com/api/v3/coins/list/new"
+COINGECKO_NEW_WEB = "https://www.coingecko.com/en/new-cryptocurrencies"
+COINGECKO_TRENDING = "https://api.coingecko.com/api/v3/search/trending"
+COINGECKO_MARKETS = "https://api.coingecko.com/api/v3/coins/markets"
+COINGECKO_CATEGORIES_LIST = "https://api.coingecko.com/api/v3/coins/categories/list"
+COINGECKO_CATEGORIES = "https://api.coingecko.com/api/v3/coins/categories"
+
+CRYPTORANK_UPCOMING = "https://cryptorank.io/upcoming-ico"
 
 # ========= AI (GitHub Models) =========
 ai = OpenAI(
@@ -49,7 +56,7 @@ def log(*args):
 
 
 # ----------------- State -----------------
-def load_state():
+def load_state() -> Dict[str, Any]:
     try:
         with open(STATE_PATH, "r", encoding="utf-8") as f:
             return json.load(f)
@@ -57,12 +64,12 @@ def load_state():
         return {"seen_projects": {}, "seen_text_hashes": {}, "last_reply_date": ""}
 
 
-def save_state(state):
+def save_state(state: Dict[str, Any]) -> None:
     with open(STATE_PATH, "w", encoding="utf-8") as f:
         json.dump(state, f, ensure_ascii=False, indent=2)
 
 
-def iso_today():
+def iso_today() -> str:
     return dt.datetime.utcnow().date().isoformat()
 
 
@@ -78,17 +85,17 @@ def hash_text(s: str) -> str:
     return hashlib.sha256(s.encode("utf-8")).hexdigest()[:16]
 
 
-def remember_text(text: str, state):
+def remember_text(text: str, state: Dict[str, Any]) -> None:
     h = hash_text(text)
     state["seen_text_hashes"][h] = iso_today()
 
 
-def remember_project(url: str, state):
+def remember_project(url: str, state: Dict[str, Any]) -> None:
     if url:
         state["seen_projects"][url] = iso_today()
 
 
-def is_duplicate_text(text: str, state):
+def is_duplicate_text(text: str, state: Dict[str, Any]) -> bool:
     h = hash_text(text)
     last = state["seen_text_hashes"].get(h, "")
     return bool(last and days_ago(last) < SEEN_DAYS_TEXT)
@@ -103,12 +110,6 @@ def fetch_text(url: str, limit: int = 120000) -> str:
         return r.text[:limit]
     except Exception:
         return ""
-
-
-def pick_source_for_this_run() -> str:
-    # deterministik: 07 & 15 UTC => CoinGecko; 11 & 19 UTC => CryptoRank
-    h = dt.datetime.utcnow().hour
-    return "coingecko" if h in (7, 15) else "cryptorank"
 
 
 def normalize_url(url: str) -> str:
@@ -135,24 +136,47 @@ def normalize_url(url: str) -> str:
     return url
 
 
+def pick_section_for_this_run() -> str:
+    """
+    Deterministik bölüm seçimi (UTC saate göre).
+    5 bölüm: trending / narrative / new / movers / upcoming
+    """
+    h = dt.datetime.utcnow().hour
+    sections = ["trending", "narrative", "new", "movers", "upcoming"]
+    return sections[h % len(sections)]
+
+
+# ----------------- CoinGecko API helpers -----------------
+def _cg_get_json(url: str, params: Optional[Dict[str, Any]] = None) -> Optional[Any]:
+    try:
+        r = requests.get(url, headers=HEADERS, params=params or {}, timeout=20)
+        if r.status_code >= 400:
+            return None
+        return r.json()
+    except Exception:
+        return None
+
+
 # ----------------- Sources -----------------
-def coingecko_new_projects():
+def coingecko_new_projects() -> List[Dict[str, str]]:
+    # API dene
     try:
         r = requests.get(COINGECKO_NEW_API, headers=HEADERS, timeout=20)
         if r.status_code == 200:
             data = r.json()
-            out = []
-            for it in data[:80]:
+            out: List[Dict[str, str]] = []
+            for it in data[:120]:
                 cid = it.get("id")
                 name = (it.get("name") or "").strip()
                 symbol = (it.get("symbol") or "").upper()
                 url = f"https://www.coingecko.com/en/coins/{cid}" if cid else COINGECKO_NEW_WEB
-                if name:
+                if name and url:
                     out.append({"name": name, "symbol": symbol, "url": url})
             return out
     except Exception:
         pass
 
+    # Web fallback
     html = fetch_text(COINGECKO_NEW_WEB)
     if not html:
         return []
@@ -166,12 +190,116 @@ def coingecko_new_projects():
                 continue
             seen.add(url)
             name = a.get_text(" ", strip=True)
-            if name and len(name) <= 40:
+            if name and len(name) <= 50:
                 out.append({"name": name, "symbol": "", "url": url})
-    return out[:40]
+    return out[:60]
 
 
-def cryptorank_upcoming_projects():
+def coingecko_trending_projects() -> List[Dict[str, str]]:
+    data = _cg_get_json(COINGECKO_TRENDING)
+    if not data or "coins" not in data:
+        return []
+    out: List[Dict[str, str]] = []
+    for item in data.get("coins", [])[:20]:
+        c = item.get("item") or {}
+        cid = c.get("id")
+        name = (c.get("name") or "").strip()
+        symbol = (c.get("symbol") or "").upper()
+        url = f"https://www.coingecko.com/en/coins/{cid}" if cid else ""
+        if name and url:
+            out.append({"name": name, "symbol": symbol, "url": url})
+    return out
+
+
+def coingecko_top_movers_projects(direction: str = "gainers") -> List[Dict[str, str]]:
+    """
+    direction: "gainers" | "losers"
+    """
+    data = _cg_get_json(
+        COINGECKO_MARKETS,
+        params={
+            "vs_currency": "usd",
+            "order": "market_cap_desc",
+            "per_page": 250,
+            "page": 1,
+            "sparkline": "false",
+            "price_change_percentage": "24h",
+        },
+    )
+    if not data:
+        return []
+
+    def pct(x):
+        try:
+            return float(x) if x is not None else -999999.0
+        except Exception:
+            return -999999.0
+
+    key = "price_change_percentage_24h_in_currency"
+    items = []
+    for it in data:
+        cid = it.get("id")
+        name = (it.get("name") or "").strip()
+        symbol = (it.get("symbol") or "").upper()
+        url = f"https://www.coingecko.com/en/coins/{cid}" if cid else ""
+        if name and url:
+            items.append({"name": name, "symbol": symbol, "url": url, "_pct": pct(it.get(key))})
+
+    if not items:
+        return []
+
+    items.sort(key=lambda x: x["_pct"], reverse=(direction == "gainers"))
+    top = items[:40]
+    for it in top:
+        it.pop("_pct", None)
+    return top
+
+
+def coingecko_random_narrative_projects() -> Tuple[List[Dict[str, str]], Optional[str]]:
+    cats = _cg_get_json(COINGECKO_CATEGORIES_LIST)
+    cat_id = None
+    cat_name = None
+
+    if isinstance(cats, list) and cats:
+        c = random.choice(cats)
+        cat_id = c.get("category_id")
+        cat_name = c.get("name") or "Narrative"
+    else:
+        cats2 = _cg_get_json(COINGECKO_CATEGORIES)
+        if isinstance(cats2, list) and cats2:
+            c = random.choice(cats2)
+            cat_id = c.get("id")
+            cat_name = c.get("name") or "Narrative"
+
+    if not cat_id:
+        return [], None
+
+    data = _cg_get_json(
+        COINGECKO_MARKETS,
+        params={
+            "vs_currency": "usd",
+            "category": cat_id,
+            "order": "volume_desc",
+            "per_page": 60,
+            "page": 1,
+            "sparkline": "false",
+        },
+    )
+    if not data:
+        return [], cat_name
+
+    out: List[Dict[str, str]] = []
+    for it in data[:50]:
+        cid = it.get("id")
+        name = (it.get("name") or "").strip()
+        symbol = (it.get("symbol") or "").upper()
+        url = f"https://www.coingecko.com/en/coins/{cid}" if cid else ""
+        if name and url:
+            out.append({"name": name, "symbol": symbol, "url": url})
+    return out, cat_name
+
+
+def cryptorank_upcoming_projects() -> List[Dict[str, str]]:
     html = fetch_text(CRYPTORANK_UPCOMING)
     if not html:
         return []
@@ -179,7 +307,7 @@ def cryptorank_upcoming_projects():
     out, seen = [], set()
     for a in soup.find_all("a", href=True):
         txt = a.get_text(" ", strip=True)
-        if not txt or len(txt) > 50:
+        if not txt or len(txt) > 60:
             continue
         href = a["href"]
         url = "https://cryptorank.io" + href if href.startswith("/") else href
@@ -188,10 +316,10 @@ def cryptorank_upcoming_projects():
         seen.add(url)
         if "/price/" in url or "/coins/" in url or "/ico/" in url:
             out.append({"name": txt, "symbol": "", "url": url})
-    return out[:40]
+    return out[:60]
 
 
-def find_x_handle_from_page(url: str):
+def find_x_handle_from_page(url: str) -> Optional[str]:
     html = fetch_text(url, limit=120000)
     if not html:
         return None
@@ -205,7 +333,7 @@ def find_x_handle_from_page(url: str):
 
 
 # ----------------- AI -----------------
-def ai_research_tweet(project, source_name):
+def ai_research_tweet(project: Dict[str, str], section_label: str) -> Tuple[str, str]:
     name = project.get("name", "").strip()
     symbol = project.get("symbol", "").strip()
     url = project.get("url", "").strip()
@@ -230,6 +358,7 @@ Rules:
 - Be factual. If unclear, say "net değil" or "belirsiz".
 - Line 2 MUST end with the URL (place it at the very end).
 
+Section: {section_label}
 Project: {name}
 Symbol: {symbol}
 URL: {url}
@@ -253,12 +382,12 @@ Return STRICT JSON:
         caption = (obj.get("caption", "") or "").strip()[:70]
         return tweet, caption
     except Exception:
-        fallback = f"{name}\nTakip: {url}\nRisk: erken aşama / detaylar net değil"
+        fallback = f"{name}\nTakip: {url}\nRisk: detaylar net değil / erken aşama"
         return fallback[:240], name[:70]
 
 
-# ----------------- Image (card) -----------------
-def _wrap_lines(text: str, max_chars: int):
+# ----------------- Image (cards) -----------------
+def _wrap_lines(text: str, max_chars: int) -> List[str]:
     words = (text or "").split()
     if not words:
         return []
@@ -267,8 +396,7 @@ def _wrap_lines(text: str, max_chars: int):
         add_len = len(w) + (1 if cur else 0)
         if cur_len + add_len > max_chars:
             lines.append(" ".join(cur))
-            cur = [w]
-            cur_len = len(w)
+            cur, cur_len = [w], len(w)
         else:
             cur.append(w)
             cur_len += add_len
@@ -277,34 +405,73 @@ def _wrap_lines(text: str, max_chars: int):
     return lines
 
 
-def make_card(title: str, subtitle: str, out: str = "card.png"):
+def _load_font(size: int, bold: bool = False):
+    candidates = [
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+    ]
+    for p in candidates:
+        try:
+            return ImageFont.truetype(p, size=size)
+        except Exception:
+            pass
+    return ImageFont.load_default()
+
+
+def make_project_card(title: str, subtitle: str, out: str = "card.png") -> str:
     W, H = 1024, 1024
     img = Image.new("RGB", (W, H), color=(15, 15, 18))
     d = ImageDraw.Draw(img)
 
-    try:
-        title_font = ImageFont.load_default()
-        sub_font = ImageFont.load_default()
-    except Exception:
-        title_font = sub_font = None
+    title_font = _load_font(64, bold=True)
+    sub_font = _load_font(38, bold=False)
+    small_font = _load_font(26, bold=False)
 
     title = (title or "").strip()[:80]
     subtitle = (subtitle or "").strip()[:220]
 
-    title_lines = _wrap_lines(title, max_chars=28)[:3]
-    sub_lines = _wrap_lines(subtitle, max_chars=44)[:5]
+    title_lines = _wrap_lines(title, max_chars=26)[:3]
+    sub_lines = _wrap_lines(subtitle, max_chars=42)[:5]
 
-    x, y = 64, 140
+    x, y = 72, 90
 
     for line in title_lines:
         d.text((x, y), line, fill=(235, 235, 235), font=title_font)
-        y += 32
+        y += 74
 
-    y += 24
+    y += 18
+    d.line((72, y, W - 72, y), fill=(55, 55, 60), width=2)
+    y += 28
 
     for line in sub_lines:
-        d.text((x, y), line, fill=(190, 190, 190), font=sub_font)
-        y += 28
+        d.text((x, y), line, fill=(195, 195, 195), font=sub_font)
+        y += 52
+
+    d.text((72, H - 70), "Not: Bu bir yatırım tavsiyesi değildir.", fill=(120, 120, 120), font=small_font)
+
+    img.save(out, "PNG")
+    return out
+
+
+def make_watchlist_card(date_iso: str, items: List[str], out: str = "card.png") -> str:
+    W, H = 1024, 1024
+    img = Image.new("RGB", (W, H), color=(15, 15, 18))
+    d = ImageDraw.Draw(img)
+
+    title_font = _load_font(64, bold=True)
+    item_font = _load_font(44, bold=False)
+    small_font = _load_font(28, bold=False)
+
+    d.text((72, 72), "Günlük Watchlist", fill=(235, 235, 235), font=title_font)
+    d.text((72, 158), date_iso, fill=(160, 160, 160), font=small_font)
+    d.line((72, 210, W - 72, 210), fill=(55, 55, 60), width=2)
+
+    y = 270
+    for it in items[:8]:
+        d.text((90, y), f"• {it}", fill=(210, 210, 210), font=item_font)
+        y += 78
+
+    d.text((72, H - 70), "Not: Bu bir yatırım tavsiyesi değildir.", fill=(120, 120, 120), font=small_font)
 
     img.save(out, "PNG")
     return out
@@ -317,27 +484,8 @@ def should_attach_image(prob: float = 0.7) -> bool:
         return True
 
 
-def tweet_with_optional_image(
-    tweet_text: str,
-    title: str,
-    subtitle: str,
-    force_image: bool = False,
-    image_prob: float = 0.7,
-) -> bool:
-    attach = True if force_image else should_attach_image(image_prob)
-    if attach:
-        img = make_card(title=title, subtitle=subtitle)
-        ok = post_tweet(tweet_text, image_path=img)
-        print(f"MEDIA: attached=1 ok={int(ok)}", flush=True)
-        return ok
-    else:
-        ok = post_tweet(tweet_text)
-        print(f"MEDIA: attached=0 ok={int(ok)}", flush=True)
-        return ok
-
-
 # ----------------- X Posting -----------------
-def post_tweet(text: str, image_path=None) -> bool:
+def post_tweet(text: str, image_path: Optional[str] = None) -> bool:
     import time
 
     for attempt in range(2):
@@ -383,8 +531,31 @@ def post_tweet(text: str, image_path=None) -> bool:
     return False
 
 
+def tweet_with_optional_image(
+    tweet_text: str,
+    title: str,
+    subtitle: str,
+    force_image: bool = False,
+    image_prob: float = 0.7,
+) -> bool:
+    attach = True if force_image else should_attach_image(image_prob)
+    if attach:
+        img = make_project_card(title=title, subtitle=subtitle)
+        ok = post_tweet(tweet_text, image_path=img)
+        print(f"MEDIA: attached=1 ok={int(ok)}", flush=True)
+        return ok
+    else:
+        ok = post_tweet(tweet_text)
+        print(f"MEDIA: attached=0 ok={int(ok)}", flush=True)
+        return ok
+
+
 # ----------------- Filters -----------------
-def filter_projects(projects, state):
+def filter_projects(projects: List[Dict[str, str]], state: Dict[str, Any]) -> List[Dict[str, str]]:
+    """
+    Sıkı filtre: seen içinde olanları çıkarır, out boşsa boş döner.
+    (Tekrarları azaltmanın ana noktası)
+    """
     out = []
     for p in projects:
         url = (p.get("url") or "").strip()
@@ -394,7 +565,7 @@ def filter_projects(projects, state):
         if last and days_ago(last) < SEEN_DAYS_PROJECT:
             continue
         out.append(p)
-    return out or projects
+    return out
 
 
 def enforce_3_lines_and_url(tweet: str, url: str) -> str:
@@ -417,20 +588,42 @@ def enforce_3_lines_and_url(tweet: str, url: str) -> str:
     return "\n".join(lines)[:240]
 
 
+# ----------------- Main -----------------
+def load_projects_for_section(section: str) -> Tuple[List[Dict[str, str]], str]:
+    narrative_name = None
+
+    if section == "new":
+        projects = coingecko_new_projects()
+        label = "New Listings"
+    elif section == "trending":
+        projects = coingecko_trending_projects()
+        label = "Trending"
+    elif section == "movers":
+        direction = "gainers" if (dt.datetime.utcnow().day % 2 == 0) else "losers"
+        projects = coingecko_top_movers_projects(direction=direction)
+        label = "Top Gainers (24h)" if direction == "gainers" else "Top Losers (24h)"
+    elif section == "narrative":
+        projects, narrative_name = coingecko_random_narrative_projects()
+        label = f"Narrative: {narrative_name or 'Category'}"
+    elif section == "upcoming":
+        projects = cryptorank_upcoming_projects()
+        label = "Upcoming Token Sales"
+    else:
+        projects = coingecko_new_projects()
+        label = "New Listings"
+
+    return projects, label
+
+
 def main():
     state = load_state()
 
-    source = pick_source_for_this_run()
-    if source == "coingecko":
-        projects = coingecko_new_projects()
-        source_name = "CoinGecko recently added"
-    else:
-        projects = cryptorank_upcoming_projects()
-        source_name = "CryptoRank upcoming token sales"
+    section = pick_section_for_this_run()
+    projects, section_label = load_projects_for_section(section)
 
-    log("SOURCE:", source, "PROJECTS:", len(projects))
+    log("SECTION:", section, "LABEL:", section_label, "PROJECTS:", len(projects))
 
-    # --- Fallback: hiç proje gelmezse bile 1 tweet at (GÖRSELLİ) ---
+    # 1) Kaynaklar tamamen boşsa: watchlist fallback (en son çare)
     if not projects:
         today = iso_today()
         fallback_tweet = (
@@ -439,89 +632,111 @@ def main():
             "• Netrum\n"
             "• OpenMind\n"
             "• TOKI Finance\n\n"
-            "Risk: bilgi akışı sınırlı olabilir / erken aşama"
+            "Risk: Bilgi akışı sınırlı olabilir; detaylar netleşmeyebilir."
         )
-        ok = tweet_with_optional_image(
-            tweet_text=fallback_tweet,
-            title="Günlük Watchlist",
-            subtitle=f"{today} • Fermah • Netrum • OpenMind • TOKI",
-            force_image=True,
-        )
-
+        items = ["Fermah", "Netrum", "OpenMind", "TOKI Finance"]
+        img = make_watchlist_card(today, items)
+        ok = post_tweet(fallback_tweet, image_path=img)
+        print(f"SUMMARY: attempted=1 posted={int(ok)} reason=FALLBACK_WATCHLIST_NO_SOURCES section={section}", flush=True)
         if ok:
             remember_text(fallback_tweet, state)
-            save_state(state)
-            print("SUMMARY: attempted=1 posted=1 reason=FALLBACK_NO_PROJECTS", flush=True)
-        else:
-            print("SUMMARY: attempted=1 posted=0 reason=FALLBACK_POST_FAILED", flush=True)
-            save_state(state)
-        return
-
-    candidates = filter_projects(projects, state)
-    project = random.choice(candidates)
-
-    project["url"] = normalize_url(project.get("url", ""))
-    url = project.get("url", "").strip()
-
-    log("PICKED:", project.get("name"), url)
-
-    if not url:
-        print("SUMMARY: attempted=1 posted=0 reason=URL_EMPTY_AFTER_NORMALIZE", flush=True)
         save_state(state)
         return
 
-    tweet, caption = ai_research_tweet(project, source_name)
-    tweet = enforce_3_lines_and_url(tweet, url)
+    # 2) Seen filtresi uygula
+    candidates = filter_projects(projects, state)
 
-    log("TWEET_DRAFT:\n" + tweet)
+    # 3) Taze aday yoksa: Radar fallback (watchlist değil)
+    if not candidates:
+        # mümkünse state'e göre en eski görüleni seçerek çeşitliliği artır
+        def last_seen_days(p: Dict[str, str]) -> int:
+            u = (p.get("url") or "").strip()
+            last = state["seen_projects"].get(u, "")
+            return days_ago(last) if last else 9999
 
-    if is_duplicate_text(tweet, state):
-        log("Duplicate text detected. Regenerating once...")
-        tweet2, caption2 = ai_research_tweet(project, source_name)
-        tweet2 = enforce_3_lines_and_url(tweet2, url)
-        if not is_duplicate_text(tweet2, state):
-            tweet, caption = tweet2, caption2
-            log("Regenerated tweet accepted.")
+        pool = sorted(projects, key=last_seen_days, reverse=True)
+        project = random.choice(pool[:20]) if pool else random.choice(projects)
+
+        project["url"] = normalize_url(project.get("url", ""))
+        url = project.get("url", "").strip()
+
+        tweet, caption = ai_research_tweet(project, section_label)
+        if url:
+            tweet = enforce_3_lines_and_url(tweet, url)
         else:
-            print("SUMMARY: attempted=1 posted=0 reason=DUPLICATE_TEXT_AFTER_RETRY", flush=True)
-            save_state(state)
-            return
+            tweet = tweet[:240]
 
-    # Normal tweet: %70 olasılıkla görsel
-    success = tweet_with_optional_image(
-        tweet_text=tweet,
-        title=project.get("name", "New Project"),
-        subtitle=caption or "quick research",
-        force_image=False,
-        image_prob=0.7,
-    )
-
-    # 1 retry
-    if not success:
-        log("Post failed. Retrying once with new text...")
-        tweet2, caption2 = ai_research_tweet(project, source_name)
-        tweet2 = enforce_3_lines_and_url(tweet2, url)
-
-        success = tweet_with_optional_image(
-            tweet_text=tweet2,
-            title=project.get("name", "New Project"),
-            subtitle=caption2 or "quick research",
+        ok = tweet_with_optional_image(
+            tweet_text=tweet,
+            title=project.get("name", "Radar"),
+            subtitle=caption or section_label,
             force_image=False,
             image_prob=0.7,
         )
 
-        if success:
+        print(f"SUMMARY: attempted=1 posted={int(ok)} reason=FALLBACK_RADAR_NO_FRESH section={section}", flush=True)
+        if ok:
+            if url:
+                remember_project(url, state)
+            remember_text(tweet, state)
+        save_state(state)
+        return
+
+    # 4) Normal akış
+    project = random.choice(candidates)
+    project["url"] = normalize_url(project.get("url", ""))
+    url = project.get("url", "").strip()
+
+    if not url:
+        print(f"SUMMARY: attempted=1 posted=0 reason=URL_EMPTY_AFTER_NORMALIZE section={section}", flush=True)
+        save_state(state)
+        return
+
+    tweet, caption = ai_research_tweet(project, section_label)
+    tweet = enforce_3_lines_and_url(tweet, url)
+
+    if is_duplicate_text(tweet, state):
+        tweet2, caption2 = ai_research_tweet(project, section_label)
+        tweet2 = enforce_3_lines_and_url(tweet2, url)
+        if not is_duplicate_text(tweet2, state):
+            tweet, caption = tweet2, caption2
+        else:
+            print(f"SUMMARY: attempted=1 posted=0 reason=DUPLICATE_TEXT_AFTER_RETRY section={section}", flush=True)
+            save_state(state)
+            return
+
+    ok = tweet_with_optional_image(
+        tweet_text=tweet,
+        title=project.get("name", "New Project"),
+        subtitle=caption or section_label,
+        force_image=False,
+        image_prob=0.7,
+    )
+
+    if not ok:
+        # 1 retry (yeni metin)
+        tweet2, caption2 = ai_research_tweet(project, section_label)
+        tweet2 = enforce_3_lines_and_url(tweet2, url)
+
+        ok = tweet_with_optional_image(
+            tweet_text=tweet2,
+            title=project.get("name", "New Project"),
+            subtitle=caption2 or section_label,
+            force_image=False,
+            image_prob=0.7,
+        )
+        if ok:
             tweet, caption = tweet2, caption2
 
-    if not success:
-        print("SUMMARY: attempted=1 posted=0 reason=POST_FAILED_AFTER_RETRY", flush=True)
+    if not ok:
+        print(f"SUMMARY: attempted=1 posted=0 reason=POST_FAILED_AFTER_RETRY section={section}", flush=True)
         save_state(state)
         return
 
     remember_project(url, state)
     remember_text(tweet, state)
     save_state(state)
-    print("SUMMARY: attempted=1 posted=1 reason=NORMAL", flush=True)
+    print(f"SUMMARY: attempted=1 posted=1 reason=NORMAL section={section}", flush=True)
 
 
 if __name__ == "__main__":
