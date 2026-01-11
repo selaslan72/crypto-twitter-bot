@@ -380,10 +380,28 @@ def main():
 
     log("SOURCE:", source, "PROJECTS:", len(projects))
 
-    if not projects:
-        print("No projects found. Exiting.", flush=True)
-        save_state(state)
-        return
+    # If no eligible projects were found, post a fallback tweet instead of exiting silently.
+if not projects:
+    fallback_tweet = (
+        "Today’s feed is quiet, so here’s the watchlist:\n"
+        "• Fermah\n"
+        "• Netrum\n"
+        "• OpenMind\n"
+        "• TOKI Finance\n\n"
+        "If you spot an update, drop it in the replies. Not financial advice."
+    )
+
+    try:
+        # IMPORTANT: replace `post_tweet` with your actual function name if different.
+        # e.g. twitter_client.post_tweet(...), create_tweet(...), publish_tweet(...), etc.
+        post_tweet(fallback_tweet)
+        print("SUMMARY: attempted=1 posted=1 reason=FALLBACK_NO_PROJECTS")
+    except Exception as e:
+        # If publishing fails, fail the run so you notice it immediately.
+        print(f"FATAL: failed to post fallback tweet: {e}")
+        raise
+
+    return
 
     candidates = filter_projects(projects, state)
     project = random.choice(candidates)
