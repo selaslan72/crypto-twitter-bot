@@ -2,113 +2,7 @@ import os, re, json, random, hashlib
 import datetime as dt
 import requests
 from bs4 import BeautifulSoup
-from PIL import Image, ImageDraw, 
-from PIL import ImageFont
-
-# ----------------- Image (card) -----------------
-def _wrap_lines(text: str, max_chars: int):
-    """
-    Basit satır kaydırma: kelime bazlı, max_chars sınırı.
-    """
-    words = (text or "").split()
-    if not words:
-        return []
-    lines, cur = [], []
-    cur_len = 0
-    for w in words:
-        add_len = len(w) + (1 if cur else 0)
-        if cur_len + add_len > max_chars:
-            lines.append(" ".join(cur))
-            cur = [w]
-            cur_len = len(w)
-        else:
-            cur.append(w)
-            cur_len += add_len
-    if cur:
-        lines.append(" ".join(cur))
-    return lines
-
-
-def make_card(title: str, subtitle: str, footer: str = "crypto-bot research card", out: str = "card.png"):
-    """
-    1024x1024 basit bir bilgi kartı üretir.
-    Font dosyası gerektirmemesi için default font kullanır.
-    """
-    W, H = 1024, 1024
-    img = Image.new("RGB", (W, H), color=(15, 15, 18))
-    d = ImageDraw.Draw(img)
-
-    # Varsayılan font (runner uyumlu)
-    try:
-        title_font = ImageFont.load_default()
-        sub_font = ImageFont.load_default()
-        foot_font = ImageFont.load_default()
-    except Exception:
-        title_font = sub_font = foot_font = None
-
-    # Metinleri kırp + wrap
-    title = (title or "").strip()[:80]
-    subtitle = (subtitle or "").strip()[:220]
-    footer = (footer or "").strip()[:80]
-
-    title_lines = _wrap_lines(title, max_chars=28)[:3]
-    sub_lines = _wrap_lines(subtitle, max_chars=44)[:5]
-
-    # Konumlar
-    x = 64
-    y = 120
-
-    # Başlık
-    for line in title_lines:
-        d.text((x, y), line, fill=(235, 235, 235), font=title_font)
-        y += 32  # default font için satır aralığı
-
-    y += 28  # boşluk
-
-    # Alt başlık
-    for line in sub_lines:
-        d.text((x, y), line, fill=(190, 190, 190), font=sub_font)
-        y += 28
-
-    # Footer
-    d.text((x, H - 80), footer, fill=(120, 120, 120), font=foot_font)
-
-    img.save(out, "PNG")
-    return out
-
-
-def should_attach_image(prob: float = 0.7) -> bool:
-    """
-    %70 gibi olasılıklarla görsel ekleme kararı.
-    """
-    try:
-        return (random.random() < float(prob))
-    except Exception:
-        return True  # güvenli default
-
-
-def tweet_with_optional_image(
-    tweet_text: str,
-    title: str,
-    subtitle: str,
-    force_image: bool = False,
-    image_prob: float = 0.7,
-) -> bool:
-    """
-    Tek noktadan tweet at: force_image True ise her zaman görsel,
-    değilse image_prob ile olasılıksal.
-    """
-    attach = True if force_image else should_attach_image(image_prob)
-    if attach:
-        img = make_card(title=title, subtitle=subtitle)
-        ok = post_tweet(tweet_text, image_path=img)
-        print(f"MEDIA: attached=1 ok={int(ok)}", flush=True)
-        return ok
-    else:
-        ok = post_tweet(tweet_text)
-        print(f"MEDIA: attached=0 ok={int(ok)}", flush=True)
-        return ok
-
+from PIL import Image, ImageDraw, ImageFont
 
 import tweepy
 from openai import OpenAI
@@ -218,17 +112,12 @@ def pick_source_for_this_run() -> str:
 
 
 def normalize_url(url: str) -> str:
-    """
-    URL'yi mümkünse redirect sonrası final haline getirir.
-    HEAD/GET başarısız olursa URL'yi boş yapmaz; olduğu gibi bırakır.
-    """
     url = (url or "").strip()
     if not url:
         return ""
     url = url.split()[0]
     url = url.rstrip(").,;]}>\"'")
 
-    # HEAD dene
     try:
         r = requests.head(url, headers=HEADERS, timeout=12, allow_redirects=True)
         if r.status_code < 400 and r.url:
@@ -236,7 +125,6 @@ def normalize_url(url: str) -> str:
     except Exception:
         pass
 
-    # GET dene
     try:
         r = requests.get(url, headers=HEADERS, timeout=12, allow_redirects=True)
         if r.status_code < 400 and r.url:
@@ -244,13 +132,11 @@ def normalize_url(url: str) -> str:
     except Exception:
         pass
 
-    # Son çare: URL'yi olduğu gibi döndür
     return url
 
 
 # ----------------- Sources -----------------
 def coingecko_new_projects():
-    # API dene
     try:
         r = requests.get(COINGECKO_NEW_API, headers=HEADERS, timeout=20)
         if r.status_code == 200:
@@ -267,7 +153,6 @@ def coingecko_new_projects():
     except Exception:
         pass
 
-    # Web fallback
     html = fetch_text(COINGECKO_NEW_WEB)
     if not html:
         return []
@@ -372,24 +257,89 @@ Return STRICT JSON:
         return fallback[:240], name[:70]
 
 
-# ----------------- Image (free, local) -----------------
-def make_card(title: str, subtitle: str, out="card.png"):
-    img = Image.new("RGB", (1024, 1024), color=(15, 15, 18))
+# ----------------- Image (card) -----------------
+def _wrap_lines(text: str, max_chars: int):
+    words = (text or "").split()
+    if not words:
+        return []
+    lines, cur, cur_len = [], [], 0
+    for w in words:
+        add_len = len(w) + (1 if cur else 0)
+        if cur_len + add_len > max_chars:
+            lines.append(" ".join(cur))
+            cur = [w]
+            cur_len = len(w)
+        else:
+            cur.append(w)
+            cur_len += add_len
+    if cur:
+        lines.append(" ".join(cur))
+    return lines
+
+
+def make_card(title: str, subtitle: str, out: str = "card.png"):
+    W, H = 1024, 1024
+    img = Image.new("RGB", (W, H), color=(15, 15, 18))
     d = ImageDraw.Draw(img)
-    title = title.strip()[:60]
-    subtitle = subtitle.strip()[:120]
-    d.text((64, 140), title, fill=(235, 235, 235))
-    d.text((64, 230), subtitle, fill=(190, 190, 190))
-    d.text((64, 920), "new / upcoming project", fill=(120, 120, 120))
+
+    try:
+        title_font = ImageFont.load_default()
+        sub_font = ImageFont.load_default()
+    except Exception:
+        title_font = sub_font = None
+
+    title = (title or "").strip()[:80]
+    subtitle = (subtitle or "").strip()[:220]
+
+    title_lines = _wrap_lines(title, max_chars=28)[:3]
+    sub_lines = _wrap_lines(subtitle, max_chars=44)[:5]
+
+    x, y = 64, 140
+
+    for line in title_lines:
+        d.text((x, y), line, fill=(235, 235, 235), font=title_font)
+        y += 32
+
+    y += 24
+
+    for line in sub_lines:
+        d.text((x, y), line, fill=(190, 190, 190), font=sub_font)
+        y += 28
+
     img.save(out, "PNG")
     return out
+
+
+def should_attach_image(prob: float = 0.7) -> bool:
+    try:
+        return random.random() < float(prob)
+    except Exception:
+        return True
+
+
+def tweet_with_optional_image(
+    tweet_text: str,
+    title: str,
+    subtitle: str,
+    force_image: bool = False,
+    image_prob: float = 0.7,
+) -> bool:
+    attach = True if force_image else should_attach_image(image_prob)
+    if attach:
+        img = make_card(title=title, subtitle=subtitle)
+        ok = post_tweet(tweet_text, image_path=img)
+        print(f"MEDIA: attached=1 ok={int(ok)}", flush=True)
+        return ok
+    else:
+        ok = post_tweet(tweet_text)
+        print(f"MEDIA: attached=0 ok={int(ok)}", flush=True)
+        return ok
 
 
 # ----------------- X Posting -----------------
 def post_tweet(text: str, image_path=None) -> bool:
     import time
 
-    # 1 kez retry (toplam 2 deneme)
     for attempt in range(2):
         try:
             if image_path:
@@ -406,7 +356,6 @@ def post_tweet(text: str, image_path=None) -> bool:
             return True
 
         except tweepy.errors.TooManyRequests as e:
-            # Rate limit -> bekle ve tekrar dene
             wait_s = 910
             try:
                 headers = getattr(e.response, "headers", {}) or {}
@@ -421,7 +370,6 @@ def post_tweet(text: str, image_path=None) -> bool:
             continue
 
         except tweepy.errors.Forbidden as e:
-            # 403 -> retry işe yaramaz
             print("X_FORBIDDEN_403:", str(e), flush=True)
             return False
 
@@ -459,12 +407,10 @@ def enforce_3_lines_and_url(tweet: str, url: str) -> str:
         else:
             lines.append("Takip:")
 
-    # URL line2 sonu
     if url:
         l2 = lines[1].split("http")[0].strip()
         lines[1] = (l2 + " " + url).strip()
 
-    # Risk satırı garanti
     if not lines[2].lower().startswith("risk"):
         lines[2] = ("Risk: " + lines[2]).strip()
 
@@ -484,7 +430,7 @@ def main():
 
     log("SOURCE:", source, "PROJECTS:", len(projects))
 
-    # --- Fallback: hiç proje gelmezse bile 1 tweet at ---
+    # --- Fallback: hiç proje gelmezse bile 1 tweet at (GÖRSELLİ) ---
     if not projects:
         today = iso_today()
         fallback_tweet = (
@@ -495,7 +441,13 @@ def main():
             "• TOKI Finance\n\n"
             "Risk: bilgi akışı sınırlı olabilir / erken aşama"
         )
-        ok = post_tweet(fallback_tweet)
+        ok = tweet_with_optional_image(
+            tweet_text=fallback_tweet,
+            title="Günlük Watchlist",
+            subtitle=f"{today} • Fermah • Netrum • OpenMind • TOKI",
+            force_image=True,
+        )
+
         if ok:
             remember_text(fallback_tweet, state)
             save_state(state)
@@ -508,27 +460,21 @@ def main():
     candidates = filter_projects(projects, state)
     project = random.choice(candidates)
 
-    # URL'yi normalize et ve project'e yaz
     project["url"] = normalize_url(project.get("url", ""))
     url = project.get("url", "").strip()
 
     log("PICKED:", project.get("name"), url)
 
-    # URL tamamen boşsa: tweet atma (ama summary bas)
     if not url:
         print("SUMMARY: attempted=1 posted=0 reason=URL_EMPTY_AFTER_NORMALIZE", flush=True)
         save_state(state)
         return
 
-    # Tweet üret
     tweet, caption = ai_research_tweet(project, source_name)
-
-    # 3 satır + URL düzelt
     tweet = enforce_3_lines_and_url(tweet, url)
 
     log("TWEET_DRAFT:\n" + tweet)
 
-    # Duplicate text ise 1 kere yeniden üret
     if is_duplicate_text(tweet, state):
         log("Duplicate text detected. Regenerating once...")
         tweet2, caption2 = ai_research_tweet(project, source_name)
@@ -541,17 +487,14 @@ def main():
             save_state(state)
             return
 
-    # Görsel: sadece UTC 07:00 (TR 10:00)
-    h = dt.datetime.utcnow().hour
-    with_image = (h == 7)
-
+    # Normal tweet: %70 olasılıkla görsel
     success = tweet_with_optional_image(
-    tweet_text=tweet,
-    title=project.get("name", "New Project"),
-    subtitle=caption or "quick research",
-    force_image=False,
-    image_prob=0.7,
-)
+        tweet_text=tweet,
+        title=project.get("name", "New Project"),
+        subtitle=caption or "quick research",
+        force_image=False,
+        image_prob=0.7,
+    )
 
     # 1 retry
     if not success:
@@ -559,11 +502,13 @@ def main():
         tweet2, caption2 = ai_research_tweet(project, source_name)
         tweet2 = enforce_3_lines_and_url(tweet2, url)
 
-        if with_image:
-            img = make_card(project.get("name", "New Project"), caption2 or "quick research")
-            success = post_tweet(tweet2, image_path=img)
-        else:
-            success = post_tweet(tweet2)
+        success = tweet_with_optional_image(
+            tweet_text=tweet2,
+            title=project.get("name", "New Project"),
+            subtitle=caption2 or "quick research",
+            force_image=False,
+            image_prob=0.7,
+        )
 
         if success:
             tweet, caption = tweet2, caption2
@@ -573,7 +518,6 @@ def main():
         save_state(state)
         return
 
-    # state güncelle
     remember_project(url, state)
     remember_text(tweet, state)
     save_state(state)
