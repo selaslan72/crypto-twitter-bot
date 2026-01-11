@@ -2,7 +2,111 @@ import os, re, json, random, hashlib
 import datetime as dt
 import requests
 from bs4 import BeautifulSoup
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, from PIL import ImageFont
+# ----------------- Image (card) -----------------
+def _wrap_lines(text: str, max_chars: int):
+    """
+    Basit satır kaydırma: kelime bazlı, max_chars sınırı.
+    """
+    words = (text or "").split()
+    if not words:
+        return []
+    lines, cur = [], []
+    cur_len = 0
+    for w in words:
+        add_len = len(w) + (1 if cur else 0)
+        if cur_len + add_len > max_chars:
+            lines.append(" ".join(cur))
+            cur = [w]
+            cur_len = len(w)
+        else:
+            cur.append(w)
+            cur_len += add_len
+    if cur:
+        lines.append(" ".join(cur))
+    return lines
+
+
+def make_card(title: str, subtitle: str, footer: str = "crypto-bot research card", out: str = "card.png"):
+    """
+    1024x1024 basit bir bilgi kartı üretir.
+    Font dosyası gerektirmemesi için default font kullanır.
+    """
+    W, H = 1024, 1024
+    img = Image.new("RGB", (W, H), color=(15, 15, 18))
+    d = ImageDraw.Draw(img)
+
+    # Varsayılan font (runner uyumlu)
+    try:
+        title_font = ImageFont.load_default()
+        sub_font = ImageFont.load_default()
+        foot_font = ImageFont.load_default()
+    except Exception:
+        title_font = sub_font = foot_font = None
+
+    # Metinleri kırp + wrap
+    title = (title or "").strip()[:80]
+    subtitle = (subtitle or "").strip()[:220]
+    footer = (footer or "").strip()[:80]
+
+    title_lines = _wrap_lines(title, max_chars=28)[:3]
+    sub_lines = _wrap_lines(subtitle, max_chars=44)[:5]
+
+    # Konumlar
+    x = 64
+    y = 120
+
+    # Başlık
+    for line in title_lines:
+        d.text((x, y), line, fill=(235, 235, 235), font=title_font)
+        y += 32  # default font için satır aralığı
+
+    y += 28  # boşluk
+
+    # Alt başlık
+    for line in sub_lines:
+        d.text((x, y), line, fill=(190, 190, 190), font=sub_font)
+        y += 28
+
+    # Footer
+    d.text((x, H - 80), footer, fill=(120, 120, 120), font=foot_font)
+
+    img.save(out, "PNG")
+    return out
+
+
+def should_attach_image(prob: float = 0.7) -> bool:
+    """
+    %70 gibi olasılıklarla görsel ekleme kararı.
+    """
+    try:
+        return (random.random() < float(prob))
+    except Exception:
+        return True  # güvenli default
+
+
+def tweet_with_optional_image(
+    tweet_text: str,
+    title: str,
+    subtitle: str,
+    force_image: bool = False,
+    image_prob: float = 0.7,
+) -> bool:
+    """
+    Tek noktadan tweet at: force_image True ise her zaman görsel,
+    değilse image_prob ile olasılıksal.
+    """
+    attach = True if force_image else should_attach_image(image_prob)
+    if attach:
+        img = make_card(title=title, subtitle=subtitle)
+        ok = post_tweet(tweet_text, image_path=img)
+        print(f"MEDIA: attached=1 ok={int(ok)}", flush=True)
+        return ok
+    else:
+        ok = post_tweet(tweet_text)
+        print(f"MEDIA: attached=0 ok={int(ok)}", flush=True)
+        return ok
+
 
 import tweepy
 from openai import OpenAI
@@ -439,12 +543,13 @@ def main():
     h = dt.datetime.utcnow().hour
     with_image = (h == 7)
 
-    success = False
-    if with_image:
-        img = make_card(project.get("name", "New Project"), caption or "quick research")
-        success = post_tweet(tweet, image_path=img)
-    else:
-        success = post_tweet(tweet)
+    success = tweet_with_optional_image(
+    tweet_text=tweet,
+    title=project.get("name", "New Project"),
+    subtitle=caption or "quick research",
+    force_image=False,
+    image_prob=0.7,
+)
 
     # 1 retry
     if not success:
